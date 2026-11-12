@@ -10,7 +10,8 @@ extern "C" {
 #endif
 
 typedef struct meow_bus {
-    canfd_bus_t can;
+    /* Owned by the application/BSP, not by the Meow driver. */
+    canfd_bus_t *can;
     canopen_t co;
 
     uint8_t host_node_id;
@@ -32,7 +33,7 @@ typedef struct meow_bus {
 } meow_bus_t;
 
 meow_status_t meow_bus_init(meow_bus_t *bus,
-                            board_fdcan_id_t can_id,
+                            canfd_bus_t *can,
                             uint8_t host_node_id);
 meow_status_t meow_bus_start(meow_bus_t *bus);
 

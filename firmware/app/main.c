@@ -10,9 +10,9 @@
 
 #define APP_MAX_MOTORS MEOW_MAX_MOTORS
 #define DISCOVERY_LISTEN_MS 1500U
-#define APP_BUS_COUNT 3U
 
 typedef struct {
+    canfd_bus_t can;
     meow_bus_t bus;
     meow_motor_t motors[APP_MAX_MOTORS];
     uint8_t motor_count;
@@ -25,12 +25,15 @@ typedef struct {
     const char *name;
 } app_bus_config_t;
 
-/* Three buses run independently; each bus uses the same host node ID 0x10. */
-static const app_bus_config_t g_bus_config[APP_BUS_COUNT] = {
+/* Bus selection: keep only the physical ports this application uses. */
+static const app_bus_config_t g_bus_config[] = {
     {BOARD_FDCAN_1, "CAN1 (PD0/PD1)"},
     {BOARD_FDCAN_2, "CAN2 (PB5/PB6)"},
     {BOARD_FDCAN_3, "CAN3 (PD12/PD13)"},
 };
+
+#define APP_BUS_COUNT \
+    ((uint8_t)(sizeof(g_bus_config) / sizeof(g_bus_config[0])))
 
 /* Runtime state stays in .bss; only the small config table above is in flash. */
 static app_bus_t g_buses[APP_BUS_COUNT];
@@ -136,7 +139,11 @@ static void configure_bus(app_bus_t *b)
 
 static bool init_bus(app_bus_t *b)
 {
-    if (meow_bus_init(&b->bus, b->can_id, MEOW_HOST_NODE_ID) != MEOW_OK) {
+    if (canfd_bus_init(&b->can, b->can_id, true) != HAL_OK) {
+        printf("[%s] canfd_bus_init failed\r\n", b->name);
+        return false;
+    }
+    if (meow_bus_init(&b->bus, &b->can, MEOW_HOST_NODE_ID) != MEOW_OK) {
         printf("[%s] meow_bus_init failed\r\n", b->name);
         return false;
     }
@@ -288,9 +295,10 @@ int main(void)
 
     printf("\r\n");
     printf("==============================================\r\n");
-    printf(" DM-MC02 / STM32H723 3-bus Meow driver example\r\n");
-    printf(" CAN1 + CAN2 + CAN3, host node 0x10 on each bus\r\n");
-    printf(" OUT1/OUT2 motor power: ON (CAN3 uses external 24V)\r\n");
+    printf(" DM-MC02 / STM32H723 Meow driver example\r\n");
+    printf(" %u bus(es), host node 0x%02X on each bus\r\n",
+           (unsigned)APP_BUS_COUNT, (unsigned)MEOW_HOST_NODE_ID);
+    printf(" OUT1/OUT2 motor power: ON\r\n");
     printf(" SYSCLK = %lu Hz\r\n", (unsigned long)SystemCoreClock);
     printf("==============================================\r\n");
 
@@ -329,9 +337,9 @@ int main(void)
                 printf("[%s] motors=%u rx=%lu tx=%lu drop=%lu busoff=%lu\r\n",
                        b->name,
                        b->motor_count,
-                       (unsigned long)b->bus.can.rx_frames,
-                       (unsigned long)b->bus.can.tx_frames,
-                       (unsigned long)b->bus.can.rx_dropped,
+                       (unsigned long)b->can.rx_frames,
+                       (unsigned long)b->can.tx_frames,
+                       (unsigned long)b->can.rx_dropped,
                        (unsigned long)b->bus.bus_off_count);
 
                 for (m = 0U; m < b->motor_count; m++) {

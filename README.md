@@ -78,7 +78,7 @@ BSP / STM32H723 FDCAN
 | `meow_types` | 型号、模式、错误码、范围、状态等公共类型 |
 | `meow_codec` | 压缩 MIT 打包、TPDO 解码、速度估计 |
 | `meow_motor` | 单台电机初始化、参数读写、MIT/PV/PP/力矩控制 |
-| `meow_bus` | 多电机共享帧、发现、心跳、在线监控 |
+| `meow_bus` | 多电机共享帧、发现、心跳、在线监控（不选择物理总线） |
 | `canopen` | NMT、SDO、心跳生产/消费 |
 | `canfd` | CAN-FD 收发、BRS、TDC、bus-off 恢复 |
 | `board_fdcan` | 1 Mbit/s 仲裁段 + 5 Mbit/s 数据段时序 |
@@ -131,6 +131,7 @@ JLinkExe -device STM32H723VG -if SWD -speed 4000 \
 #include "meow_bus.h"
 #include "meow_motor.h"
 
+canfd_bus_t can1, can2, can3;
 meow_bus_t bus1, bus2, bus3;
 meow_motor_t motors1[MEOW_MAX_MOTORS];
 meow_motor_t motors2[MEOW_MAX_MOTORS];
@@ -140,9 +141,15 @@ meow_motor_t motors3[MEOW_MAX_MOTORS];
 board_motor_power_set(BOARD_MOTOR_POWER_OUT1, true);  /* CAN1 / P7 */
 board_motor_power_set(BOARD_MOTOR_POWER_OUT2, true);  /* CAN2 / P8 */
 
-meow_bus_init(&bus1, BOARD_FDCAN_1, 0x10U);  /* PD0/PD1 */
-meow_bus_init(&bus2, BOARD_FDCAN_2, 0x10U);  /* PB5/PB6 */
-meow_bus_init(&bus3, BOARD_FDCAN_3, 0x10U);  /* PD12/PD13 */
+/* 物理总线由 app/BSP 选择和初始化。 */
+canfd_bus_init(&can1, BOARD_FDCAN_1, true);  /* PD0/PD1 */
+canfd_bus_init(&can2, BOARD_FDCAN_2, true);  /* PB5/PB6 */
+canfd_bus_init(&can3, BOARD_FDCAN_3, true);  /* PD12/PD13 */
+
+/* Meow 驱动只绑定传输实例，不关心用的是 CAN1/2/3。 */
+meow_bus_init(&bus1, &can1, 0x10U);
+meow_bus_init(&bus2, &can2, 0x10U);
+meow_bus_init(&bus3, &can3, 0x10U);
 
 meow_bus_start(&bus1);
 meow_bus_start(&bus2);
@@ -182,6 +189,10 @@ while (1) {
 所有电机必须在对应的 `meow_bus_configure()` 之前加入。示例应用会同时轮询三条总线
 做发现，支持多条总线同时配置，并在主循环里补挂启动较晚的电机；没有电机的总线扫描
 后保持静默，不发送主机心跳。
+
+总线选择属于应用层：`main.c` 的 `g_bus_config` 表只保留需要使用的
+`BOARD_FDCAN_x` 即可，`meow_bus` 不会自动探测或强制使用三条总线。物理传输实例由
+app/BSP 创建，`meow_bus_init()` 只负责绑定。
 
 ### 3.4 压缩 MIT
 

@@ -48,26 +48,20 @@ static void meow_bus_rx_cb(void *ctx, uint32_t cob_id, const uint8_t *data, uint
 }
 
 meow_status_t meow_bus_init(meow_bus_t *bus,
-                            board_fdcan_id_t can_id,
+                            canfd_bus_t *can,
                             uint8_t host_node_id)
 {
-    HAL_StatusTypeDef hst;
-
-    if (bus == 0) {
+    if ((bus == 0) || (can == 0) || (can->hfdcan == 0)) {
         return MEOW_ERR_INVALID_ARG;
     }
 
     memset(bus, 0, sizeof(*bus));
+    bus->can = can;
     bus->host_node_id = (uint8_t)(host_node_id & 0x7FU);
     bus->rpdo1_cob_id = (uint16_t)(0x180U + bus->host_node_id);
     bus->rpdo2_cob_id = (uint16_t)(0x280U + bus->host_node_id);
 
-    hst = canfd_bus_init(&bus->can, can_id, true);
-    if (hst != HAL_OK) {
-        return MEOW_ERR_IO;
-    }
-
-    canopen_init(&bus->co, &bus->can, bus->host_node_id, meow_bus_rx_cb, bus);
+    canopen_init(&bus->co, bus->can, bus->host_node_id, meow_bus_rx_cb, bus);
 
     /*
      * Keep the host heartbeat off until every motor has finished SDO
@@ -81,17 +75,17 @@ meow_status_t meow_bus_init(meow_bus_t *bus,
 
 meow_status_t meow_bus_start(meow_bus_t *bus)
 {
-    if (bus == 0) {
+    if ((bus == 0) || (bus->can == 0)) {
         return MEOW_ERR_INVALID_ARG;
     }
-    return (canfd_bus_start(&bus->can) == HAL_OK) ? MEOW_OK : MEOW_ERR_IO;
+    return (canfd_bus_start(bus->can) == HAL_OK) ? MEOW_OK : MEOW_ERR_IO;
 }
 
 meow_status_t meow_bus_discover(meow_bus_t *bus, uint32_t listen_ms)
 {
     uint32_t start;
 
-    if (bus == 0) {
+    if ((bus == 0) || (bus->can == 0)) {
         return MEOW_ERR_INVALID_ARG;
     }
 
@@ -212,7 +206,8 @@ void meow_bus_sync(meow_bus_t *bus)
     bool send_modes = false;
     uint32_t now;
 
-    if ((bus == 0) || !bus->sync_enabled || (bus->motor_count == 0U)) {
+    if ((bus == 0) || (bus->can == 0) ||
+        !bus->sync_enabled || (bus->motor_count == 0U)) {
         return;
     }
 
@@ -254,7 +249,7 @@ void meow_bus_sync(meow_bus_t *bus)
     {
         uint8_t len = (uint8_t)(total * 8U);
         bool fd = (len > 8U);
-        if (canfd_send_ex(&bus->can, bus->rpdo1_cob_id, rpdo1, len, fd, true, 0U) == HAL_OK) {
+        if (canfd_send_ex(bus->can, bus->rpdo1_cob_id, rpdo1, len, fd, true, 0U) == HAL_OK) {
             bus->tx_frames++;
         } else {
             bus->tx_dropped++;
@@ -262,7 +257,7 @@ void meow_bus_sync(meow_bus_t *bus)
     }
 
     if (send_modes) {
-        if (canfd_send(&bus->can, bus->rpdo2_cob_id, rpdo2, total, false, 0U) == HAL_OK) {
+        if (canfd_send(bus->can, bus->rpdo2_cob_id, rpdo2, total, false, 0U) == HAL_OK) {
             bus->tx_frames++;
         } else {
             bus->tx_dropped++;
@@ -282,19 +277,19 @@ void meow_bus_poll(meow_bus_t *bus)
     uint32_t now;
     uint8_t i;
 
-    if (bus == 0) {
+    if ((bus == 0) || (bus->can == 0)) {
         return;
     }
 
     canopen_poll(&bus->co);
 
     now = board_millis();
-    canfd_get_status(&bus->can, &cs);
+    canfd_get_status(bus->can, &cs);
     if (cs.bus_off) {
         if ((now - bus->last_bus_off_recovery_ms) >= BUS_OFF_RETRY_MS) {
             bus->last_bus_off_recovery_ms = now;
             bus->bus_off_count++;
-            (void)canfd_recover_bus_off(&bus->can);
+            (void)canfd_recover_bus_off(bus->can);
             for (i = 0U; i < bus->motor_count; i++) {
                 bus->motors[i]->ready = false;
                 bus->motors[i]->enabled = false;
