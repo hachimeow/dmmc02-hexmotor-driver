@@ -85,10 +85,6 @@ option(MEOW_DEBUG_OD "Probe the motor object dictionary once" OFF)
 option(MEOW_DEMO_CIA_PP "Test Profile Position via CiA402 objects" OFF)
 set(MEOW_TEST_NODE "2" CACHE STRING "Motor node used by one-shot tests")
 set_property(CACHE MEOW_TEST_NODE PROPERTY STRINGS 1 2)
-set(MEOW_CAN_PORT "2" CACHE STRING "FDCAN port used by the app (1, 2 or 3)")
-set_property(CACHE MEOW_CAN_PORT PROPERTY STRINGS 1 2 3)
-set(MEOW_MOTOR_POWER_PORT "2" CACHE STRING "Motor power output: 0=none, 1=OUT1/P7, 2=OUT2/P8")
-set_property(CACHE MEOW_MOTOR_POWER_PORT PROPERTY STRINGS 0 1 2)
 
 # Optional: extracted Debian/Ubuntu toolchain packages keep newlib outside the
 # compiler's default search path. The official ARM tarball does not need this.
@@ -112,9 +108,7 @@ target_compile_definitions(dmmc02_hexmotor.elf PRIVATE
     MEOW_DEMO_PVPP=$<BOOL:${MEOW_DEMO_PVPP}>
     MEOW_DEBUG_OD=$<BOOL:${MEOW_DEBUG_OD}>
     MEOW_DEMO_CIA_PP=$<BOOL:${MEOW_DEMO_CIA_PP}>
-    MEOW_TEST_NODE=${MEOW_TEST_NODE}
-    MEOW_CAN_PORT=${MEOW_CAN_PORT}
-    MEOW_MOTOR_POWER_PORT=${MEOW_MOTOR_POWER_PORT})
+    MEOW_TEST_NODE=${MEOW_TEST_NODE})
 
 target_compile_options(dmmc02_hexmotor.elf PRIVATE
     ${MCU_FLAGS}

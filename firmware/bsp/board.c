@@ -10,7 +10,8 @@
  *   PC15 = Power_5V_EN   (external 5 V rail, also feeds the CAN transceivers)
  *
  * The CAN transceivers are powered from VCC_5V, so PC15 must be high before
- * any CAN traffic is attempted. The high-current outputs are left disabled.
+ * any CAN traffic is attempted. board_power_init() leaves the high-current
+ * outputs disabled; the application enables OUT1/OUT2 as needed.
  */
 void board_power_init(void)
 {

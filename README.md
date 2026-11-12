@@ -18,7 +18,7 @@ dmmc02-hexmotor/
 ├── firmware/
 │   ├── CMakeLists.txt
 │   ├── app/
-│   │   ├── main.c                  # 应用入口
+│   │   ├── main.c                  # 三总线例程：CAN1 + CAN2 + CAN3
 │   │   ├── demo.c                  # 可选自检（默认关闭）
 │   │   └── demo.h
 │   ├── bsp/
@@ -99,8 +99,7 @@ export ARM_TOOLCHAIN_PATH=/path/to/arm-none-eabi/bin
 
 cmake -S . -B build \
   -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi.cmake \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DMEOW_CAN_PORT=2
+  -DCMAKE_BUILD_TYPE=Debug
 
 cmake --build build -j
 ```
@@ -121,27 +120,64 @@ JLinkExe -device STM32H723VG -if SWD -speed 4000 \
   -autoconnect 1 -CommandFile /tmp/flash.jlink
 ```
 
-### 3.3 初始化
+### 3.3 三总线初始化
+
+每条物理总线使用独立的 `meow_bus_t` 和电机数组；主机节点 ID 都是 `0x10`，互不冲突。
 
 ```c
+#include "board.h"
 #include "meow_bus.h"
 #include "meow_motor.h"
 
-meow_bus_t bus;
-meow_motor_t motors[2];
+meow_bus_t bus1, bus2, bus3;
+meow_motor_t motors1[MEOW_MAX_MOTORS];
+meow_motor_t motors2[MEOW_MAX_MOTORS];
+meow_motor_t motors3[MEOW_MAX_MOTORS];
 
-meow_bus_init(&bus, BOARD_FDCAN_2, 0x10U);  /* host NMT node */
-meow_bus_start(&bus);
-meow_bus_discover(&bus, 1500U);
+/* 上电默认打开两路可控电机电源，不做额外判断。 */
+board_motor_power_set(BOARD_MOTOR_POWER_OUT1, true);  /* CAN1 / P7 */
+board_motor_power_set(BOARD_MOTOR_POWER_OUT2, true);  /* CAN2 / P8 */
 
-meow_bus_add_motor(&bus, &motors[0], 0x01U);
-meow_bus_add_motor(&bus, &motors[1], 0x02U);
+/* 等电机控制器启动完成后再发现。 */
+board_delay_ms(500U);
 
-/* NULL 使用默认压缩 MIT 范围 */
-meow_bus_configure(&bus, NULL);
+meow_bus_init(&bus1, BOARD_FDCAN_1, 0x10U);  /* PD0/PD1 */
+meow_bus_init(&bus2, BOARD_FDCAN_2, 0x10U);  /* PB5/PB6 */
+meow_bus_init(&bus3, BOARD_FDCAN_3, 0x10U);  /* PD12/PD13 */
+
+meow_bus_start(&bus1);
+meow_bus_start(&bus2);
+meow_bus_start(&bus3);
+
+meow_bus_discover(&bus1, 1500U);
+meow_bus_discover(&bus2, 1500U);
+meow_bus_discover(&bus3, 1500U);
+
+/* 每条总线上的节点 ID 必须唯一。 */
+meow_bus_add_motor(&bus1, &motors1[0], 0x01U);
+meow_bus_add_motor(&bus2, &motors2[0], 0x01U);
+meow_bus_add_motor(&bus2, &motors2[1], 0x02U);
+
+/* NULL 使用默认压缩 MIT 范围。 */
+meow_bus_configure(&bus1, NULL);
+meow_bus_configure(&bus2, NULL);
+meow_bus_configure(&bus3, NULL);
+
+while (1) {
+    meow_bus_poll(&bus1);
+    meow_bus_poll(&bus2);
+    meow_bus_poll(&bus3);
+
+    meow_bus_sync(&bus1);
+    meow_bus_sync(&bus2);
+    meow_bus_sync(&bus3);
+
+    board_delay_ms(1U);
+}
 ```
 
-所有电机必须在 `meow_bus_configure()` 之前加入，且节点 ID 唯一。
+所有电机必须在对应的 `meow_bus_configure()` 之前加入。示例应用会自动发现在线的
+电机；没有电机的总线扫描后保持静默，不发送主机心跳。
 
 ### 3.4 压缩 MIT
 
@@ -211,31 +247,43 @@ if (st.fault || st.error_code != 0U) {
 }
 ```
 
-### 3.8 多电机
+### 3.8 多总线与多电机
 
-- 主机节点默认 `0x10`。
-- 共享 RPDO1：`0x190`，每台电机 8 字节压缩 MIT。
-- 共享 RPDO2：`0x290`，每台电机 1 字节模式。
-- 1 台电机：8 字节；2–8 台：`8 × N` 字节 CAN-FD + BRS。
-- 所有电机必须在 `meow_bus_configure()` 之前加入。
+- CAN1、CAN2、CAN3 可同时运行，各自有独立的 `meow_bus_t`。
+- 每条总线的主机节点默认 `0x10`，因为三条物理总线互相隔离。
+- 每条总线独立的共享 RPDO1 `0x190`（每台电机 8 字节压缩 MIT）和
+  RPDO2 `0x290`（每台电机 1 字节模式）。
+- 同一条总线上节点 ID 必须唯一；不同总线可以使用相同节点 ID。
+- 1 台电机：8 字节经典帧；2–8 台：`8 × N` 字节 CAN-FD + BRS。
+- 所有电机必须在对应总线的 `meow_bus_configure()` 之前加入。
 
 ### 3.9 电机电源
 
 ```c
-board_motor_power_set(BOARD_MOTOR_POWER_OUT2, true);   /* 打开 */
+board_motor_power_set(BOARD_MOTOR_POWER_OUT1, true);   /* CAN1 / P7 */
+board_motor_power_set(BOARD_MOTOR_POWER_OUT2, true);   /* CAN2 / P8 */
 board_motor_power_set(BOARD_MOTOR_POWER_OUT2, false);  /* 关断 */
 ```
+
+示例固件在上电时无条件打开 OUT1 和 OUT2，不做电压、电流或状态判断。
+
+| 接口 | CAN | 电机 24V |
+| --- | --- | --- |
+| P7 / OUT1（PC14） | CAN1 | 可控 |
+| P8 / OUT2（PC13） | CAN2 | 可控 |
+| P12 | CAN3 | 无开关，需外部 24V |
+
+`PC15 / Power_5V_EN` 只控制 5V 逻辑/CAN 收发器电源，不能用来切电机。
 
 ### 3.10 构建选项
 
 | 选项 | 默认 | 说明 |
 | --- | --- | --- |
-| `MEOW_CAN_PORT` | `2` | FDCAN 口：1/2/3 |
-| `MEOW_MOTOR_POWER_PORT` | `2` | 上电使能的电机电源口：0=不使能，1=OUT1，2=OUT2 |
 | `MEOW_DEMO_MIT` | `OFF` | MIT 零力矩自检 |
 | `MEOW_DEMO_PVPP` | `OFF` | PV/PP 自检 |
 | `MEOW_DEBUG_OD` | `OFF` | 对象字典探测 |
-| `MEOW_TEST_NODE` | `2` | 自检目标节点 |
+| `MEOW_DEMO_CIA_PP` | `OFF` | CiA402 PP 专项诊断 |
+| `MEOW_TEST_NODE` | `2` | 自检目标节点（1=4310，2=4342） |
 
 ## 4. 字段含义
 

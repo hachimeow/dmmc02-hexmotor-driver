@@ -10,72 +10,57 @@
 
 #define APP_MAX_MOTORS MEOW_MAX_MOTORS
 #define DISCOVERY_LISTEN_MS 1500U
-#define RESCAN_PERIOD_MS 10000U
+#define SCAN_FIRST_NODE 1U
+#define SCAN_LAST_NODE 16U
+#define APP_BUS_COUNT 3U
 
-#if MEOW_CAN_PORT == 1
-#define APP_CAN_PORT BOARD_FDCAN_1
-#define APP_CAN_NAME "CAN1 (PD0/PD1)"
-#elif MEOW_CAN_PORT == 2
-#define APP_CAN_PORT BOARD_FDCAN_2
-#define APP_CAN_NAME "CAN2 (PB5/PB6)"
-#elif MEOW_CAN_PORT == 3
-#define APP_CAN_PORT BOARD_FDCAN_3
-#define APP_CAN_NAME "CAN3 (PD12/PD13)"
-#else
-#error "MEOW_CAN_PORT must be 1, 2 or 3"
-#endif
+typedef struct {
+    meow_bus_t bus;
+    meow_motor_t motors[APP_MAX_MOTORS];
+    uint8_t motor_count;
+    board_fdcan_id_t can_id;
+    const char *name;
+} app_bus_t;
 
-static meow_bus_t g_bus;
-static meow_motor_t g_motors[APP_MAX_MOTORS];
-static uint8_t g_motor_count;
+typedef struct {
+    board_fdcan_id_t can_id;
+    const char *name;
+} app_bus_config_t;
+
+/* Three buses run independently; each bus uses the same host node ID 0x10. */
+static const app_bus_config_t g_bus_config[APP_BUS_COUNT] = {
+    {BOARD_FDCAN_1, "CAN1 (PD0/PD1)"},
+    {BOARD_FDCAN_2, "CAN2 (PB5/PB6)"},
+    {BOARD_FDCAN_3, "CAN3 (PD12/PD13)"},
+};
+
+/* Runtime state stays in .bss; only the small config table above is in flash. */
+static app_bus_t g_buses[APP_BUS_COUNT];
 
 static const char *model_name(const meow_motor_t *motor)
 {
     return meow_model_name(motor->model);
 }
 
-static bool add_motor(uint8_t node_id)
+static bool add_motor(app_bus_t *b, uint8_t node_id)
 {
-    if (meow_bus_find_motor(&g_bus, node_id) != 0) {
+    if (meow_bus_find_motor(&b->bus, node_id) != 0) {
         return true;
     }
-    if (g_motor_count >= APP_MAX_MOTORS) {
+    if (b->motor_count >= APP_MAX_MOTORS) {
         return false;
     }
-    if (meow_bus_add_motor(&g_bus, &g_motors[g_motor_count], node_id) < 0) {
+    if (meow_bus_add_motor(&b->bus, &b->motors[b->motor_count], node_id) < 0) {
         return false;
     }
-    g_motor_count++;
+    b->motor_count++;
     return true;
 }
 
-static void discover_and_add(void)
+static void print_identity(const app_bus_t *b, const meow_motor_t *motor)
 {
-    uint8_t i;
-
-    (void)meow_bus_discover(&g_bus, DISCOVERY_LISTEN_MS);
-    printf("discovery: %u heartbeat(s)\r\n", g_bus.discovered_count);
-
-    for (i = 0U; i < g_bus.discovered_count; i++) {
-        (void)add_motor(g_bus.discovered[i]);
-    }
-
-    if (g_motor_count == 0U) {
-        printf("no heartbeats, scanning node IDs 1..127...\r\n");
-        for (uint16_t nid = 1U; nid <= 127U; nid++) {
-            meow_motor_t temp;
-            memset(&temp, 0, sizeof(temp));
-            temp.node_id = (uint8_t)nid;
-            if (meow_motor_probe(&g_bus, &temp) == MEOW_OK) {
-                (void)add_motor((uint8_t)nid);
-            }
-        }
-    }
-}
-
-static void print_identity(const meow_motor_t *motor)
-{
-    printf("  node 0x%02X: %s vendor=0x%08lX product=0x%08lX rev=0x%08lX\r\n",
+    printf("[%s] node 0x%02X: %s vendor=0x%08lX product=0x%08lX rev=0x%08lX\r\n",
+           b->name,
            motor->node_id,
            model_name(motor),
            (unsigned long)motor->vendor_id,
@@ -87,7 +72,7 @@ static void print_identity(const meow_motor_t *motor)
            motor->heartbeat_period_ms);
 }
 
-static void print_state(const meow_motor_t *motor)
+static void print_state(const app_bus_t *b, const meow_motor_t *motor)
 {
     meow_motor_state_t st;
 
@@ -95,9 +80,10 @@ static void print_state(const meow_motor_t *motor)
         return;
     }
 
-    printf("  0x%02X %-14s %-8s online=%u ready=%u enabled=%u mode=%u "
+    printf("  [%s] 0x%02X %-14s %-8s online=%u ready=%u enabled=%u mode=%u "
            "pos=%0.4f rev vel=%0.3f rev/s trq=%0.3f Nm "
            "temp=%0.1f/%0.1f C err=0x%04X %s\r\n",
+           b->name,
            motor->node_id,
            model_name(motor),
            meow_mode_name(st.mode_display),
@@ -114,103 +100,144 @@ static void print_state(const meow_motor_t *motor)
            meow_error_name(st.error_code));
 }
 
+static void configure_bus(app_bus_t *b)
+{
+    meow_status_t st;
+    uint8_t i;
+
+    if (b->motor_count == 0U) {
+        return;
+    }
+
+    /* The motor-side heartbeat consumer is configured during init. */
+    canopen_set_heartbeat(&b->bus.co, true);
+
+    printf("[%s] configuring %u motor(s)...\r\n", b->name, b->motor_count);
+    st = meow_bus_configure(&b->bus, NULL);
+    if (st != MEOW_OK) {
+        printf("[%s] configure returned %s\r\n", b->name, meow_status_str(st));
+    }
+
+    for (i = 0U; i < b->motor_count; i++) {
+        print_identity(b, &b->motors[i]);
+        if (b->motors[i].ready) {
+            demo_init(&b->bus, &b->motors[i]);
+        }
+    }
+}
+
+static void scan_bus(app_bus_t *b)
+{
+    uint8_t i;
+
+    (void)meow_bus_discover(&b->bus, DISCOVERY_LISTEN_MS);
+    printf("[%s] discovery: %u heartbeat(s)\r\n", b->name, b->bus.discovered_count);
+
+    for (i = 0U; i < b->bus.discovered_count; i++) {
+        (void)add_motor(b, b->bus.discovered[i]);
+    }
+
+    if (b->motor_count == 0U) {
+        printf("[%s] scanning node IDs %u..%u...\r\n",
+               b->name, SCAN_FIRST_NODE, SCAN_LAST_NODE);
+        for (uint16_t nid = SCAN_FIRST_NODE; nid <= SCAN_LAST_NODE; nid++) {
+            meow_motor_t temp;
+            memset(&temp, 0, sizeof(temp));
+            temp.node_id = (uint8_t)nid;
+            if (meow_motor_probe(&b->bus, &temp) == MEOW_OK) {
+                (void)add_motor(b, (uint8_t)nid);
+            }
+        }
+    }
+
+    if (b->motor_count > 0U) {
+        configure_bus(b);
+    } else {
+        /* Keep an empty bus quiet: no need to send host heartbeats. */
+        canopen_set_heartbeat(&b->bus.co, false);
+    }
+}
+
+static bool init_bus(app_bus_t *b)
+{
+    if (meow_bus_init(&b->bus, b->can_id, MEOW_HOST_NODE_ID) != MEOW_OK) {
+        printf("[%s] meow_bus_init failed\r\n", b->name);
+        return false;
+    }
+    if (meow_bus_start(&b->bus) != MEOW_OK) {
+        printf("[%s] meow_bus_start failed\r\n", b->name);
+        return false;
+    }
+
+    /* Quiet until a motor is actually found; scan_bus() enables it. */
+    canopen_set_heartbeat(&b->bus.co, false);
+    scan_bus(b);
+    return true;
+}
+
 int main(void)
 {
     uint32_t last_print_ms = 0U;
-    uint32_t last_scan_ms = 0U;
     uint8_t i;
+
+    for (i = 0U; i < APP_BUS_COUNT; i++) {
+        g_buses[i].can_id = g_bus_config[i].can_id;
+        g_buses[i].name = g_bus_config[i].name;
+    }
 
     board_init();
 
+    /* Default power state: both controllable motor ports on, no checks. */
+    board_motor_power_set(BOARD_MOTOR_POWER_OUT1, true);
+    board_motor_power_set(BOARD_MOTOR_POWER_OUT2, true);
+
+    /* Give the motor controllers time to boot before discovery. */
+    board_delay_ms(500U);
+
     printf("\r\n");
     printf("==============================================\r\n");
-    printf(" DM-MC02 / STM32H723 Meow compressed-MIT driver\r\n");
+    printf(" DM-MC02 / STM32H723 3-bus Meow driver example\r\n");
+    printf(" CAN1 + CAN2 + CAN3, host node 0x10 on each bus\r\n");
+    printf(" OUT1/OUT2 motor power: ON (CAN3 uses external 24V)\r\n");
     printf(" SYSCLK = %lu Hz\r\n", (unsigned long)SystemCoreClock);
-    printf(" %s, 1 Mbit/s nominal, 5 Mbit/s data\r\n", APP_CAN_NAME);
-    printf(" host node = 0x%02X, shared RPDO1 = 0x%03X, RPDO2 = 0x%03X\r\n",
-           MEOW_HOST_NODE_ID,
-           0x180U + MEOW_HOST_NODE_ID,
-           0x280U + MEOW_HOST_NODE_ID);
     printf("==============================================\r\n");
 
-    if (meow_bus_init(&g_bus, APP_CAN_PORT, MEOW_HOST_NODE_ID) != MEOW_OK) {
-        printf("meow_bus_init failed on %s\r\n", APP_CAN_NAME);
-        while (1) {
-        }
-    }
-    if (meow_bus_start(&g_bus) != MEOW_OK) {
-        printf("meow_bus_start failed on %s\r\n", APP_CAN_NAME);
-        while (1) {
-        }
-    }
-
-#if MEOW_MOTOR_POWER_PORT != 0
-    board_motor_power_set((board_motor_power_port_t)MEOW_MOTOR_POWER_PORT, true);
-    printf("motor power OUT%d enabled, waiting for the drive to boot...\r\n",
-           MEOW_MOTOR_POWER_PORT);
-    board_delay_ms(500U);
-#else
-    printf("motor power output not enabled (MEOW_MOTOR_POWER_PORT=0)\r\n");
-#endif
-
-    discover_and_add();
-    last_scan_ms = board_millis();
-
-    if (g_motor_count > 0U) {
-        printf("configuring %u motor(s)...\r\n", g_motor_count);
-        {
-            meow_status_t st = meow_bus_configure(&g_bus, NULL);
-            if (st != MEOW_OK) {
-                printf("meow_bus_configure returned %s\r\n", meow_status_str(st));
-            }
-        }
-        for (i = 0U; i < g_motor_count; i++) {
-            print_identity(&g_motors[i]);
-            if (g_motors[i].ready) {
-                demo_init(&g_bus, &g_motors[i]);
-            }
-        }
-    } else {
-        printf("no supported Meow motor found; rescan every %u ms\r\n",
-               RESCAN_PERIOD_MS);
+    for (i = 0U; i < APP_BUS_COUNT; i++) {
+        (void)init_bus(&g_buses[i]);
     }
 
     while (1) {
         uint32_t now;
 
         board_led_effect_poll();
-        meow_bus_poll(&g_bus);
-        meow_bus_sync(&g_bus);
 
-        for (i = 0U; i < g_motor_count; i++) {
-            demo_poll(&g_bus, &g_motors[i]);
+        for (i = 0U; i < APP_BUS_COUNT; i++) {
+            uint8_t m;
+            meow_bus_poll(&g_buses[i].bus);
+            meow_bus_sync(&g_buses[i].bus);
+            for (m = 0U; m < g_buses[i].motor_count; m++) {
+                demo_poll(&g_buses[i].bus, &g_buses[i].motors[m]);
+            }
         }
 
         now = board_millis();
         if ((now - last_print_ms) >= 1000U) {
             last_print_ms = now;
             printf("--- status @ %lu ms ---\r\n", (unsigned long)now);
-            for (i = 0U; i < g_motor_count; i++) {
-                print_state(&g_motors[i]);
-            }
-            printf("    CAN rx=%lu tx=%lu sync=%lu drop=%lu busoff=%lu\r\n",
-                   (unsigned long)g_bus.can.rx_frames,
-                   (unsigned long)g_bus.can.tx_frames,
-                   (unsigned long)g_bus.tx_frames,
-                   (unsigned long)g_bus.tx_dropped,
-                   (unsigned long)g_bus.bus_off_count);
-        }
+            for (i = 0U; i < APP_BUS_COUNT; i++) {
+                app_bus_t *b = &g_buses[i];
+                uint8_t m;
 
-        if ((g_motor_count == 0U) && ((now - last_scan_ms) >= RESCAN_PERIOD_MS)) {
-            last_scan_ms = now;
-            discover_and_add();
-            if (g_motor_count > 0U) {
-                (void)meow_bus_configure(&g_bus, NULL);
-                for (i = 0U; i < g_motor_count; i++) {
-                    print_identity(&g_motors[i]);
-                    if (g_motors[i].ready) {
-                        demo_init(&g_bus, &g_motors[i]);
-                    }
+                printf("[%s] motors=%u rx=%lu tx=%lu drop=%lu busoff=%lu\r\n",
+                       b->name,
+                       b->motor_count,
+                       (unsigned long)b->bus.can.rx_frames,
+                       (unsigned long)b->bus.can.tx_frames,
+                       (unsigned long)b->bus.can.rx_dropped,
+                       (unsigned long)b->bus.bus_off_count);
+
+                for (m = 0U; m < b->motor_count; m++) {
+                    print_state(b, &b->motors[m]);
                 }
             }
         }
