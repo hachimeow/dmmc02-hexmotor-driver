@@ -1,0 +1,27 @@
+# Build output
+/build/
+/build-*/
+/build-host/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# Tool output
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.su
+
+# OS
+.DS_Store
+
+# Excluded from this repository
+/tools/
+/docs/
