@@ -89,6 +89,8 @@ BSP / STM32H723 FDCAN
 - **MIT 控制下行**：`meow_motor_mit()` 只更新缓存 → `meow_bus_sync()` 把每台电机 8 字节目标打包为共享 RPDO1 `0x190` → FDCAN 发送。
 - **模式控制**：共享 RPDO2 `0x290` 每台电机 1 字节模式；PP/PV 的 SDO 参数由 `meow_motor` 写入。
 - **状态上行**：FDCAN 中断 → RX 环形缓冲 → `meow_bus_poll()` → 心跳/TPDO 解码 → `meow_motor` 状态缓存。
+- **多总线初始化**：主机心跳默认关闭，所有电机完成 SDO 配置后再开启；阻塞 SDO 期间
+  通过 `canopen_t::service_cb` 轮询其他总线，避免某条总线长时间得不到服务。
 
 ## 3. 使用方式
 
@@ -138,9 +140,6 @@ meow_motor_t motors3[MEOW_MAX_MOTORS];
 board_motor_power_set(BOARD_MOTOR_POWER_OUT1, true);  /* CAN1 / P7 */
 board_motor_power_set(BOARD_MOTOR_POWER_OUT2, true);  /* CAN2 / P8 */
 
-/* 等电机控制器启动完成后再发现。 */
-board_delay_ms(500U);
-
 meow_bus_init(&bus1, BOARD_FDCAN_1, 0x10U);  /* PD0/PD1 */
 meow_bus_init(&bus2, BOARD_FDCAN_2, 0x10U);  /* PB5/PB6 */
 meow_bus_init(&bus3, BOARD_FDCAN_3, 0x10U);  /* PD12/PD13 */
@@ -149,11 +148,12 @@ meow_bus_start(&bus1);
 meow_bus_start(&bus2);
 meow_bus_start(&bus3);
 
+/* 主机心跳默认关闭，等所有 SDO 配置完成后再打开。 */
 meow_bus_discover(&bus1, 1500U);
 meow_bus_discover(&bus2, 1500U);
 meow_bus_discover(&bus3, 1500U);
 
-/* 每条总线上的节点 ID 必须唯一。 */
+/* 每条总线上的节点 ID 必须唯一；不同总线可以重复。 */
 meow_bus_add_motor(&bus1, &motors1[0], 0x01U);
 meow_bus_add_motor(&bus2, &motors2[0], 0x01U);
 meow_bus_add_motor(&bus2, &motors2[1], 0x02U);
@@ -161,7 +161,10 @@ meow_bus_add_motor(&bus2, &motors2[1], 0x02U);
 /* NULL 使用默认压缩 MIT 范围。 */
 meow_bus_configure(&bus1, NULL);
 meow_bus_configure(&bus2, NULL);
-meow_bus_configure(&bus3, NULL);
+
+/* 配置完成后才开主机心跳；空总线保持静默。 */
+canopen_set_heartbeat(&bus1.co, true);
+canopen_set_heartbeat(&bus2.co, true);
 
 while (1) {
     meow_bus_poll(&bus1);
@@ -176,8 +179,9 @@ while (1) {
 }
 ```
 
-所有电机必须在对应的 `meow_bus_configure()` 之前加入。示例应用会自动发现在线的
-电机；没有电机的总线扫描后保持静默，不发送主机心跳。
+所有电机必须在对应的 `meow_bus_configure()` 之前加入。示例应用会同时轮询三条总线
+做发现，支持多条总线同时配置，并在主循环里补挂启动较晚的电机；没有电机的总线扫描
+后保持静默，不发送主机心跳。
 
 ### 3.4 压缩 MIT
 

@@ -357,6 +357,9 @@ static meow_status_t wait_operational(meow_bus_t *bus, meow_motor_t *motor)
     uint32_t start = board_millis();
 
     while ((board_millis() - start) < NMT_WAIT_MS) {
+        if (bus->co.service_cb != 0) {
+            bus->co.service_cb(bus->co.service_ctx);
+        }
         meow_bus_poll(bus);
         if (motor->nmt_state == (uint8_t)CO_NMT_OPERATIONAL) {
             return MEOW_OK;

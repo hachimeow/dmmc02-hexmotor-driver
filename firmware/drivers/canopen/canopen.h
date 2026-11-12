@@ -61,6 +61,7 @@ typedef struct {
 
 typedef void (*co_rx_cb_t)(void *ctx, uint32_t cob_id,
                            const uint8_t *data, uint8_t len);
+typedef void (*co_service_cb_t)(void *ctx);
 
 typedef struct {
     canfd_bus_t *bus;
@@ -72,6 +73,10 @@ typedef struct {
     bool heartbeat_enabled;
     co_rx_cb_t rx_cb;
     void *rx_ctx;
+
+    /* Called while an SDO transfer is waiting, so other buses keep running. */
+    co_service_cb_t service_cb;
+    void *service_ctx;
 } canopen_t;
 
 void canopen_init(canopen_t *co, canfd_bus_t *bus, uint8_t host_node_id,

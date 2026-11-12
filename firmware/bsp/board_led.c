@@ -50,8 +50,9 @@ void board_led_set_rgb(uint8_t r, uint8_t g, uint8_t b)
         txbuf[23U - i] = ((b & (1U << i)) != 0U) ? WS2812_HIGH : WS2812_LOW;
     }
 
-    (void)HAL_SPI_Transmit(&hspi6, txbuf, sizeof(txbuf), 20U);
-    (void)HAL_SPI_Transmit(&hspi6, reset, sizeof(reset), 20U);
+    /* Keep the timeout short so an LED update cannot stall the motor loop. */
+    (void)HAL_SPI_Transmit(&hspi6, txbuf, sizeof(txbuf), 2U);
+    (void)HAL_SPI_Transmit(&hspi6, reset, sizeof(reset), 2U);
 }
 
 void board_led_init(void)
@@ -129,7 +130,7 @@ void board_led_effect_poll(void)
     }
 
     now = board_millis();
-    if ((now - s_last_update_ms) < 20U) {
+    if ((now - s_last_update_ms) < 100U) {
         return;
     }
     s_last_update_ms = now;

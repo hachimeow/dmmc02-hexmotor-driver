@@ -37,7 +37,7 @@ void canopen_init(canopen_t *co, canfd_bus_t *bus, uint8_t host_node_id,
     memset(co, 0, sizeof(*co));
     co->bus = bus;
     co->host_node_id = host_node_id & 0x7FU;
-    co->heartbeat_period_ms = 100U;
+    co->heartbeat_period_ms = 50U;
     co->host_state = CO_NMT_OPERATIONAL;
     co->heartbeat_enabled = false;
     co->rx_cb = rx_cb;
@@ -137,6 +137,13 @@ static void canopen_sdo_parse_response(canopen_t *co, const uint8_t *data, uint8
     }
 }
 
+static void canopen_service(canopen_t *co)
+{
+    if ((co != 0) && (co->service_cb != 0)) {
+        co->service_cb(co->service_ctx);
+    }
+}
+
 void canopen_poll(canopen_t *co)
 {
     canfd_frame_t frame;
@@ -203,6 +210,7 @@ co_status_t canopen_sdo_upload(canopen_t *co, uint8_t node_id,
 
     start_ms = board_millis();
     while (!co->sdo.done) {
+        canopen_service(co);
         canopen_poll(co);
         if ((board_millis() - start_ms) >= timeout_ms) {
             co->sdo.pending = false;
@@ -270,6 +278,7 @@ co_status_t canopen_sdo_download(canopen_t *co, uint8_t node_id,
 
     start_ms = board_millis();
     while (!co->sdo.done) {
+        canopen_service(co);
         canopen_poll(co);
         if ((board_millis() - start_ms) >= timeout_ms) {
             co->sdo.pending = false;

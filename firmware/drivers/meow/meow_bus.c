@@ -68,7 +68,14 @@ meow_status_t meow_bus_init(meow_bus_t *bus,
     }
 
     canopen_init(&bus->co, &bus->can, bus->host_node_id, meow_bus_rx_cb, bus);
-    canopen_set_heartbeat(&bus->co, true);
+
+    /*
+     * Keep the host heartbeat off until every motor has finished SDO
+     * configuration. The motor arms its consumer watchdog on the first
+     * heartbeat, so early heartbeats can cause a false 0x8130 if a later
+     * SDO sequence blocks the control loop.
+     */
+    canopen_set_heartbeat(&bus->co, false);
     return MEOW_OK;
 }
 

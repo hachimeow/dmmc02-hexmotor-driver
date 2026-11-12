@@ -10,8 +10,6 @@
 
 #define APP_MAX_MOTORS MEOW_MAX_MOTORS
 #define DISCOVERY_LISTEN_MS 1500U
-#define SCAN_FIRST_NODE 1U
-#define SCAN_LAST_NODE 16U
 #define APP_BUS_COUNT 3U
 
 typedef struct {
@@ -36,6 +34,19 @@ static const app_bus_config_t g_bus_config[APP_BUS_COUNT] = {
 
 /* Runtime state stays in .bss; only the small config table above is in flash. */
 static app_bus_t g_buses[APP_BUS_COUNT];
+
+/* Keep the other buses alive while one bus is blocked in an SDO transfer. */
+static void service_other_buses(void *ctx)
+{
+    app_bus_t *active = (app_bus_t *)ctx;
+    uint8_t i;
+
+    for (i = 0U; i < APP_BUS_COUNT; i++) {
+        if (&g_buses[i] != active) {
+            meow_bus_poll(&g_buses[i].bus);
+        }
+    }
+}
 
 static const char *model_name(const meow_motor_t *motor)
 {
@@ -109,9 +120,6 @@ static void configure_bus(app_bus_t *b)
         return;
     }
 
-    /* The motor-side heartbeat consumer is configured during init. */
-    canopen_set_heartbeat(&b->bus.co, true);
-
     printf("[%s] configuring %u motor(s)...\r\n", b->name, b->motor_count);
     st = meow_bus_configure(&b->bus, NULL);
     if (st != MEOW_OK) {
@@ -126,53 +134,140 @@ static void configure_bus(app_bus_t *b)
     }
 }
 
-static void scan_bus(app_bus_t *b)
-{
-    uint8_t i;
-
-    (void)meow_bus_discover(&b->bus, DISCOVERY_LISTEN_MS);
-    printf("[%s] discovery: %u heartbeat(s)\r\n", b->name, b->bus.discovered_count);
-
-    for (i = 0U; i < b->bus.discovered_count; i++) {
-        (void)add_motor(b, b->bus.discovered[i]);
-    }
-
-    if (b->motor_count == 0U) {
-        printf("[%s] scanning node IDs %u..%u...\r\n",
-               b->name, SCAN_FIRST_NODE, SCAN_LAST_NODE);
-        for (uint16_t nid = SCAN_FIRST_NODE; nid <= SCAN_LAST_NODE; nid++) {
-            meow_motor_t temp;
-            memset(&temp, 0, sizeof(temp));
-            temp.node_id = (uint8_t)nid;
-            if (meow_motor_probe(&b->bus, &temp) == MEOW_OK) {
-                (void)add_motor(b, (uint8_t)nid);
-            }
-        }
-    }
-
-    if (b->motor_count > 0U) {
-        configure_bus(b);
-    } else {
-        /* Keep an empty bus quiet: no need to send host heartbeats. */
-        canopen_set_heartbeat(&b->bus.co, false);
-    }
-}
-
 static bool init_bus(app_bus_t *b)
 {
     if (meow_bus_init(&b->bus, b->can_id, MEOW_HOST_NODE_ID) != MEOW_OK) {
         printf("[%s] meow_bus_init failed\r\n", b->name);
         return false;
     }
+
+    b->bus.co.service_cb = service_other_buses;
+    b->bus.co.service_ctx = b;
+
     if (meow_bus_start(&b->bus) != MEOW_OK) {
         printf("[%s] meow_bus_start failed\r\n", b->name);
         return false;
     }
 
-    /* Quiet until a motor is actually found; scan_bus() enables it. */
+    /*
+     * Keep host heartbeats off until every motor is configured. The motor
+     * arms its 0x1016 watchdog on the first heartbeat, so sending one during
+     * a later blocking SDO sequence would trip a false 0x8130.
+     */
     canopen_set_heartbeat(&b->bus.co, false);
-    scan_bus(b);
+    b->bus.discovered_count = 0U;
+    (void)canopen_nmt(&b->bus.co, CO_NMT_CMD_PREOP, 0U);
     return true;
+}
+
+/* Discover all buses together so no motor misses host heartbeats. */
+static void discover_all(void)
+{
+    uint32_t start = board_millis();
+    uint8_t i;
+
+    while ((board_millis() - start) < DISCOVERY_LISTEN_MS) {
+        for (i = 0U; i < APP_BUS_COUNT; i++) {
+            meow_bus_poll(&g_buses[i].bus);
+        }
+        board_delay_ms(1U);
+    }
+
+    for (i = 0U; i < APP_BUS_COUNT; i++) {
+        app_bus_t *b = &g_buses[i];
+        uint8_t j;
+
+        printf("[%s] discovery: %u heartbeat(s)\r\n",
+               b->name, b->bus.discovered_count);
+        for (j = 0U; j < b->bus.discovered_count; j++) {
+            (void)add_motor(b, b->bus.discovered[j]);
+        }
+    }
+}
+
+static void scan_bus(app_bus_t *b)
+{
+    uint16_t nid;
+
+    printf("[%s] scanning node IDs %u..%u...\r\n", b->name, 1U, 16U);
+    for (nid = 1U; nid <= 16U; nid++) {
+        meow_motor_t temp;
+
+        /* Let the bus recover if a previous probe hit bus-off. */
+        meow_bus_poll(&b->bus);
+
+        memset(&temp, 0, sizeof(temp));
+        temp.node_id = (uint8_t)nid;
+        if (meow_motor_probe(&b->bus, &temp) == MEOW_OK) {
+            (void)add_motor(b, (uint8_t)nid);
+        }
+    }
+}
+
+static void initialize_motors(void)
+{
+    uint8_t i;
+
+    for (i = 0U; i < APP_BUS_COUNT; i++) {
+        app_bus_t *b = &g_buses[i];
+
+        if (b->motor_count == 0U) {
+            scan_bus(b);
+        }
+        if (b->motor_count > 0U) {
+            configure_bus(b);
+        } else {
+            /* Keep an empty bus quiet. */
+            canopen_set_heartbeat(&b->bus.co, false);
+        }
+    }
+}
+
+static void start_bus_heartbeats(app_bus_t *b)
+{
+    uint8_t m;
+
+    if (b->motor_count == 0U) {
+        return;
+    }
+
+    /* Clear any fault latched before the host heartbeat was running. */
+    for (m = 0U; m < b->motor_count; m++) {
+        if (b->motors[m].ready) {
+            (void)meow_motor_clear_error(&b->bus, &b->motors[m]);
+        }
+    }
+
+    canopen_set_heartbeat(&b->bus.co, true);
+}
+
+static void start_heartbeats(void)
+{
+    uint8_t i;
+
+    for (i = 0U; i < APP_BUS_COUNT; i++) {
+        start_bus_heartbeats(&g_buses[i]);
+    }
+}
+
+/* A motor that boots after the discovery window is picked up here. */
+static void add_late_motors(app_bus_t *b)
+{
+    uint8_t before = b->motor_count;
+    uint8_t i;
+
+    if (b->motor_count != 0U) {
+        return;
+    }
+
+    for (i = 0U; i < b->bus.discovered_count; i++) {
+        (void)add_motor(b, b->bus.discovered[i]);
+    }
+
+    if (b->motor_count > before) {
+        configure_bus(b);
+        start_bus_heartbeats(b);
+    }
 }
 
 int main(void)
@@ -191,9 +286,6 @@ int main(void)
     board_motor_power_set(BOARD_MOTOR_POWER_OUT1, true);
     board_motor_power_set(BOARD_MOTOR_POWER_OUT2, true);
 
-    /* Give the motor controllers time to boot before discovery. */
-    board_delay_ms(500U);
-
     printf("\r\n");
     printf("==============================================\r\n");
     printf(" DM-MC02 / STM32H723 3-bus Meow driver example\r\n");
@@ -205,6 +297,10 @@ int main(void)
     for (i = 0U; i < APP_BUS_COUNT; i++) {
         (void)init_bus(&g_buses[i]);
     }
+
+    discover_all();
+    initialize_motors();
+    start_heartbeats();
 
     while (1) {
         uint32_t now;
@@ -227,6 +323,8 @@ int main(void)
             for (i = 0U; i < APP_BUS_COUNT; i++) {
                 app_bus_t *b = &g_buses[i];
                 uint8_t m;
+
+                add_late_motors(b);
 
                 printf("[%s] motors=%u rx=%lu tx=%lu drop=%lu busoff=%lu\r\n",
                        b->name,
